@@ -77,7 +77,20 @@ inline void camReapplySettings() {
 }
 
 // Capture and return a framebuffer. Caller MUST call esp_camera_fb_return().
+//
+// fb_count==1 freezes the single buffer between our 30-min captures: right
+// after the previous fb_return the driver grabs one frame and then, with no
+// free buffer, stops — so the next fb_get would hand back that ~30-min-old
+// frame (CAMERA_GRAB_LATEST is a no-op with fb_count==1). Discard a couple of
+// frames first to force a capture of the current scene. The OV2640 is clocked
+// continuously (XCLK always on, PWDN=-1), so auto-exposure is already tracking
+// the live scene and the flushed frame is correctly exposed.
 inline camera_fb_t *camCapture() {
   if (!g_cam_ok) return nullptr;
+  for (int i = 0; i < 2; i++) {
+    camera_fb_t *stale = esp_camera_fb_get();
+    if (!stale) return nullptr;
+    esp_camera_fb_return(stale);
+  }
   return esp_camera_fb_get();
 }
