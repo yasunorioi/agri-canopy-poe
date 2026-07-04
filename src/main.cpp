@@ -1,9 +1,10 @@
 // agri-canopy-poe — M5Stack PoECAM (ESP32-WROVER + W5500 + OV2640) node.
 //
-// - Solar irradiance from M5 ADC Unit V1.1 (ADS1110) + PVSS-03 on Grove
-//   (SDA=G25, SCL=G33), published to MQTT (agriha 1値1トピック
-//   InRadiation) and optionally UECS-CCM.
-// - OV2640 camera capture on cadence, uploaded via HTTP PUT to a WebDAV
+// - Camera-only node. Daylight gate is derived from the NOAA solar
+//   position algorithm using lat/lon and NTP-synced UTC (no ADC — the
+//   ADS1110/PVSS-03 path was removed at v0.3.0 after site noise made
+//   the analog reading unusable).
+// - OV2640 capture on cadence, uploaded via HTTP PUT to a WebDAV
 //   endpoint. On upload success the auth-free view URL is published to
 //   <prefix>/sensor/CamShot as a retained {value:"<url>",unit:"url",ts}.
 //
@@ -12,27 +13,23 @@
 // serial instead.
 
 #include <Arduino.h>
-#include <Wire.h>
 #include <AgriNode.h>
 
 #include "config.h"
-#include "sensors.h"
+#include "sun.h"
 #include "cam.h"
 #include "webdav_up.h"
 #include "mqtt_pub.h"
-#include "ccm_pub.h"
 
 const char *FW_NAME     = "agri-canopy-poe";
-const char *FW_VERSION  = "0.2.0";
+const char *FW_VERSION  = "0.3.0";
 const char *FW_REPO     = "yasunorioi/agri-canopy-poe";
 const char *FW_BIN_NAME = "agri-canopy-poe.bin";
 
 AppConfig g_cfg;
 
-bool  g_ads_ok    = false;
-bool  g_cam_ok    = false;
-float g_voltage   = 0.0f;
-float g_solar_wm2 = NAN;
+bool  g_cam_ok       = false;
+float g_sun_elev_deg = NAN;
 
 // Last successful upload — kept so the dashboard can show it and MQTT can
 // re-publish the retained value after reconnect.
@@ -45,16 +42,19 @@ static String renderDashboardSensors() {
   String s; s.reserve(512);
   char buf[16];
 
-  s = F("<h3>Solar radiation</h3><table>");
-  if (g_ads_ok) {
-    dtostrf(isnan(g_solar_wm2) ? 0.0f : g_solar_wm2, 1, 1, buf);
-    s += "<tr><th>Irradiance</th><td>"; s += buf; s += " W/m² → InRadiation</td></tr>";
-    dtostrf(g_voltage, 1, 4, buf);
-    s += "<tr><th>ADC voltage</th><td>"; s += buf; s += " V</td></tr>";
-    s += "<tr><th>Calibration</th><td>"; s += g_cfg.wm2_per_volt; s += " W/m² per V</td></tr>";
+  s = F("<h3>Sun position</h3><table>");
+  if (isnan(g_sun_elev_deg)) {
+    s += "<tr><th>Elevation</th><td>(waiting for SNTP)</td></tr>";
   } else {
-    s += "<tr><th>ADS1110</th><td>NOT detected</td></tr>";
+    dtostrf(g_sun_elev_deg, 1, 2, buf);
+    s += "<tr><th>Elevation</th><td>"; s += buf; s += " °</td></tr>";
   }
+  dtostrf(g_cfg.lat, 1, 4, buf);
+  s += "<tr><th>Latitude</th><td>";  s += buf; s += " °N</td></tr>";
+  dtostrf(g_cfg.lon, 1, 4, buf);
+  s += "<tr><th>Longitude</th><td>"; s += buf; s += " °E</td></tr>";
+  dtostrf(g_cfg.sun_elev_min_deg, 1, 1, buf);
+  s += "<tr><th>Gate threshold</th><td>&gt; "; s += buf; s += " °</td></tr>";
   s += F("</table>");
 
   s += F("<h3>Camera</h3><table>");
@@ -79,11 +79,6 @@ static String renderConfigSensorRows() {
   auto row = [&](const char *label, const String &input) {
     s += "<tr><th>"; s += label; s += "</th><td>"; s += input; s += "</td></tr>";
   };
-  // Solar calibration + CCM order
-  row("W/m² per V (PVSS-03=1000)",
-      "<input type=number name=wm2v value='" + String(g_cfg.wm2_per_volt) + "'>");
-  row("CCM Order (InRadiation)",
-      "<input type=number name=ccm_ord value='" + String(g_cfg.ccm_order) + "'>");
 
   // Camera
   row("Camera enabled",
@@ -108,8 +103,12 @@ static String renderConfigSensorRows() {
       "<input type=number name=cam_jq value='" + String(g_cfg.cam_jpeg_q) + "'>");
   row("Daylight-only capture",
       String("<input type=checkbox name=cam_dl_only") + (g_cfg.cam_daylight_only ? " checked" : "") + ">");
-  row("Daylight threshold (W/m²)",
-      "<input type=number name=cam_dl_wm2 value='" + String(g_cfg.cam_daylight_wm2) + "'>");
+  row("Latitude (°N)",
+      "<input type=text name=lat value='" + String(g_cfg.lat, 4) + "'>");
+  row("Longitude (°E)",
+      "<input type=text name=lon value='" + String(g_cfg.lon, 4) + "'>");
+  row("Sun elevation gate (°)",
+      "<input type=text name=sun_elev value='" + String(g_cfg.sun_elev_min_deg, 1) + "'>");
 
   // WebDAV
   row("WebDAV upload URL",
@@ -121,15 +120,24 @@ static String renderConfigSensorRows() {
   return s;
 }
 
+// atof() via a scratch buffer — core has parseFormInt/Bool/Str but no float.
+static float parseFormFloat(const String &body, const char *key, float defv) {
+  char buf[24];
+  buf[0] = '\0';
+  agri::parseFormStr(body, key, buf, sizeof(buf));
+  if (!buf[0]) return defv;
+  return (float)atof(buf);
+}
+
 static void applyConfigSensorForm(const String &body) {
-  g_cfg.wm2_per_volt      = (uint16_t)agri::parseFormInt(body, "wm2v",       g_cfg.wm2_per_volt);
-  g_cfg.ccm_order         = (int16_t) agri::parseFormInt(body, "ccm_ord",    g_cfg.ccm_order);
   g_cfg.cam_en            = agri::parseFormBool(body, "cam_en");
   g_cfg.cam_interval_s    = (uint32_t)agri::parseFormInt(body, "cam_int_s",  g_cfg.cam_interval_s);
   g_cfg.cam_res           = (uint8_t) agri::parseFormInt(body, "cam_res",    g_cfg.cam_res);
   g_cfg.cam_jpeg_q        = (uint8_t) agri::parseFormInt(body, "cam_jq",     g_cfg.cam_jpeg_q);
   g_cfg.cam_daylight_only = agri::parseFormBool(body, "cam_dl_only");
-  g_cfg.cam_daylight_wm2  = (uint16_t)agri::parseFormInt(body, "cam_dl_wm2", g_cfg.cam_daylight_wm2);
+  g_cfg.lat               = parseFormFloat(body, "lat",      g_cfg.lat);
+  g_cfg.lon               = parseFormFloat(body, "lon",      g_cfg.lon);
+  g_cfg.sun_elev_min_deg  = parseFormFloat(body, "sun_elev", g_cfg.sun_elev_min_deg);
   agri::parseFormStr(body, "wd_url",  g_cfg.wd_url,  sizeof(g_cfg.wd_url));
   agri::parseFormStr(body, "wd_user", g_cfg.wd_user, sizeof(g_cfg.wd_user));
   agri::parseFormStr(body, "wd_pass", g_cfg.wd_pass, sizeof(g_cfg.wd_pass));
@@ -137,12 +145,8 @@ static void applyConfigSensorForm(const String &body) {
 }
 
 static void addStatusFields(JsonObject doc) {
-  doc["sensor_ok"] = g_ads_ok;
-  doc["cam_ok"]    = g_cam_ok;
-  if (g_ads_ok) {
-    doc["voltage_v"] = g_voltage;
-    doc["solar_wm2"] = isnan(g_solar_wm2) ? 0.0f : g_solar_wm2;
-  }
+  doc["cam_ok"] = g_cam_ok;
+  if (!isnan(g_sun_elev_deg)) doc["sun_elev_deg"] = g_sun_elev_deg;
   if (g_last_cam_url.length()) {
     doc["last_cam_url"]  = g_last_cam_url;
     doc["last_cam_ms"]   = g_last_cam_ms;
@@ -152,17 +156,18 @@ static void addStatusFields(JsonObject doc) {
 
 // ---------------------------------------------------------------- Camera ----
 // Return true if the daylight gate lets us capture now.
+// If SNTP hasn't synced yet, allow (avoid dead-locking the camera on boot).
 static bool daylightOK() {
   if (!g_cfg.cam_daylight_only) return true;
-  if (!g_ads_ok || isnan(g_solar_wm2)) return true;   // no reading = allow
-  return g_solar_wm2 >= (float)g_cfg.cam_daylight_wm2;
+  if (isnan(g_sun_elev_deg))    return true;
+  return g_sun_elev_deg >= g_cfg.sun_elev_min_deg;
 }
 
 // Grab a frame and PUT it. Called on cam_interval_s cadence when enabled.
 static void captureAndUpload() {
   if (!g_cam_ok) return;
   if (!g_cfg.wd_url[0]) { Serial.println("[CAM] skip — wd_url empty"); return; }
-  if (!daylightOK())    { Serial.println("[CAM] skip — below daylight"); return; }
+  if (!daylightOK())    { Serial.println("[CAM] skip — sun below gate"); return; }
 
   camera_fb_t *fb = camCapture();
   if (!fb) { Serial.println("[CAM] fb_get failed"); return; }
@@ -186,15 +191,14 @@ void setup() {
   Serial.printf("\n=== %s v%s ===\n", FW_NAME, FW_VERSION);
 
   loadConfig();
-  Serial.printf("[CFG] node=%s host=%s mqtt=%s wd=%s cam=%s int=%us\n",
+  Serial.printf("[CFG] node=%s host=%s mqtt=%s wd=%s cam=%s int=%us lat=%.4f lon=%.4f\n",
                 g_cfg.common.node_id,
                 g_cfg.common.hostname,
                 g_cfg.common.mqtt_host[0] ? g_cfg.common.mqtt_host : "(unset)",
                 g_cfg.wd_url[0] ? g_cfg.wd_url : "(unset)",
                 g_cfg.cam_en ? "on" : "off",
-                (unsigned)g_cfg.cam_interval_s);
-
-  sensorsBegin();
+                (unsigned)g_cfg.cam_interval_s,
+                g_cfg.lat, g_cfg.lon);
 
   agri::W5500Pins pins;
   pins.sck = 23; pins.miso = 38; pins.mosi = 13; pins.cs = 4;
@@ -206,7 +210,6 @@ void setup() {
 
   camBegin();
 
-  agri::ccmBegin();
   agri::MQTT::begin();
 
   agri::WebHooks hooks;
@@ -234,10 +237,11 @@ void loop() {
 
   uint32_t now = millis();
 
-  static uint32_t lastSensorPoll = 0;
-  if (now - lastSensorPoll >= 1000) {
-    lastSensorPoll = now;
-    sensorsPoll();
+  // Refresh sun elevation once per minute — cheap and never changes faster.
+  static uint32_t lastSun = 0;
+  if (now - lastSun >= 60000UL || lastSun == 0) {
+    lastSun = now ? now : 1;
+    g_sun_elev_deg = sunElevationDeg(g_cfg.lat, g_cfg.lon);
   }
 
   if (agri::networkUp() && agri::MQTT::hasHost(g_cfg.common)) {
@@ -246,21 +250,6 @@ void loop() {
       if (now - lastTry > 5000) { lastTry = now; agri::MQTT::reconnect(g_cfg.common); }
     } else {
       agri::MQTT::loop();
-      static uint32_t lastPub = 0;
-      uint32_t interval = (uint32_t)g_cfg.common.mqtt_interval_s * 1000UL;
-      if (now - lastPub >= interval) {
-        lastPub = now;
-        mqttPublishSolar();
-      }
-    }
-  }
-
-  if (agri::networkUp() && g_cfg.common.ccm_enabled) {
-    static uint32_t lastCcm = 0;
-    uint32_t interval = (uint32_t)g_cfg.common.ccm_interval_s * 1000UL;
-    if (now - lastCcm >= interval) {
-      lastCcm = now;
-      ccmPublish();
     }
   }
 
@@ -280,10 +269,10 @@ void loop() {
   static uint32_t lastStatus = 0;
   if (now - lastStatus >= 30000) {
     lastStatus = now;
-    Serial.printf("[STATUS] link=%d lease=%d mqtt=%d ads=%d cam=%d V=%.4f wm2=%.1f up=%lus\n",
+    Serial.printf("[STATUS] link=%d lease=%d mqtt=%d cam=%d sun=%.1f up=%lus\n",
                   agri::Network::link_up, agri::Network::have_lease,
-                  agri::MQTT::connected(), g_ads_ok, g_cam_ok, g_voltage,
-                  isnan(g_solar_wm2) ? 0.0f : g_solar_wm2,
+                  agri::MQTT::connected(), g_cam_ok,
+                  isnan(g_sun_elev_deg) ? -99.0f : g_sun_elev_deg,
                   (unsigned long)(now / 1000));
   }
 

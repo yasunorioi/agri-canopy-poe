@@ -1,9 +1,8 @@
 // config.h — agri-canopy-poe NVS-backed config.
 //
-// AppConfig = CommonConfig + solar (PVSS-03 calibration + CCM order) +
-// camera (interval / resolution / quality / daylight gate) + WebDAV
-// (URL / user / password). All editable from /config; empty MQTT host or
-// WebDAV URL disables that path.
+// AppConfig = CommonConfig + camera (interval / resolution / quality /
+// daylight gate) + lat/lon + WebDAV (URL / user / password). All editable
+// from /config; empty MQTT host or WebDAV URL disables that path.
 
 #pragma once
 
@@ -25,18 +24,17 @@ enum CamRes : uint8_t {
 
 struct AppConfig {
   agri::CommonConfig common;
-  // Solar (ADS1110 + pyranometer)
-  uint16_t wm2_per_volt;    // sensor calibration (PVSS-03 = 1000)
-  int16_t  ccm_order;       // InRadiation.<ntype> order
   // Camera
   bool     cam_en;
-  uint32_t cam_interval_s;  // capture cadence
-  uint8_t  cam_res;         // CamRes
-  uint8_t  cam_jpeg_q;      // 10 (best) — 30 (small)
+  uint32_t cam_interval_s;   // capture cadence
+  uint8_t  cam_res;          // CamRes
+  uint8_t  cam_jpeg_q;       // 10 (best) — 30 (small)
   bool     cam_daylight_only;
-  uint16_t cam_daylight_wm2; // gate threshold
+  float    lat;              // degrees, +N
+  float    lon;              // degrees, +E
+  float    sun_elev_min_deg; // gate threshold (sun above horizon)
   // WebDAV target
-  char wd_url[96];          // base, e.g. "http://yasu-hp.local:8080/upload"
+  char wd_url[96];           // base, e.g. "http://yasu-hp.local:8080/upload"
   char wd_user[32];
   char wd_pass[32];
 };
@@ -48,15 +46,14 @@ inline void setDefaults() {
                        "canopy_node_01", "agri-canopy-01",
                        /*mqtt prefix = house scope*/ "agriha/2",
                        /*default_ccm_region = 別棟 ArSprout region*/13);
-  g_cfg.common.ccm_priority = 1;
-  g_cfg.wm2_per_volt      = 1000;
-  g_cfg.ccm_order         = 1;
   g_cfg.cam_en            = true;
   g_cfg.cam_interval_s    = 1800;     // 30 min
   g_cfg.cam_res           = CAM_RES_SXGA;
   g_cfg.cam_jpeg_q        = 12;
   g_cfg.cam_daylight_only = true;
-  g_cfg.cam_daylight_wm2  = 20;
+  g_cfg.lat               = 35.0f;    // rough JP centre — override in /config
+  g_cfg.lon               = 135.0f;
+  g_cfg.sun_elev_min_deg  = 5.0f;
   g_cfg.wd_url[0]  = '\0';
   g_cfg.wd_user[0] = '\0';
   g_cfg.wd_pass[0] = '\0';
@@ -67,14 +64,14 @@ inline void loadConfig() {
   Preferences p;
   if (!p.begin("canopy-cfg", true)) return;
   agri::commonLoad(g_cfg.common, p);
-  g_cfg.wm2_per_volt      = p.getUShort("wm2v",       g_cfg.wm2_per_volt);
-  g_cfg.ccm_order         = p.getShort ("ccm_ord",    g_cfg.ccm_order);
   g_cfg.cam_en            = p.getBool  ("cam_en",     g_cfg.cam_en);
   g_cfg.cam_interval_s    = p.getUInt  ("cam_int_s",  g_cfg.cam_interval_s);
   g_cfg.cam_res           = p.getUChar ("cam_res",    g_cfg.cam_res);
   g_cfg.cam_jpeg_q        = p.getUChar ("cam_jq",     g_cfg.cam_jpeg_q);
   g_cfg.cam_daylight_only = p.getBool  ("cam_dl_only",g_cfg.cam_daylight_only);
-  g_cfg.cam_daylight_wm2  = p.getUShort("cam_dl_wm2", g_cfg.cam_daylight_wm2);
+  g_cfg.lat               = p.getFloat ("lat",        g_cfg.lat);
+  g_cfg.lon               = p.getFloat ("lon",        g_cfg.lon);
+  g_cfg.sun_elev_min_deg  = p.getFloat ("sun_elev",   g_cfg.sun_elev_min_deg);
   auto loadStr = [&](const char *k, char *dst, size_t n) {
     String v = p.getString(k, dst);
     strlcpy(dst, v.c_str(), n);
@@ -89,14 +86,14 @@ inline bool saveConfig() {
   Preferences p;
   if (!p.begin("canopy-cfg", false)) return false;
   agri::commonSave(g_cfg.common, p);
-  p.putUShort("wm2v",       g_cfg.wm2_per_volt);
-  p.putShort ("ccm_ord",    g_cfg.ccm_order);
   p.putBool  ("cam_en",     g_cfg.cam_en);
   p.putUInt  ("cam_int_s",  g_cfg.cam_interval_s);
   p.putUChar ("cam_res",    g_cfg.cam_res);
   p.putUChar ("cam_jq",     g_cfg.cam_jpeg_q);
   p.putBool  ("cam_dl_only",g_cfg.cam_daylight_only);
-  p.putUShort("cam_dl_wm2", g_cfg.cam_daylight_wm2);
+  p.putFloat ("lat",        g_cfg.lat);
+  p.putFloat ("lon",        g_cfg.lon);
+  p.putFloat ("sun_elev",   g_cfg.sun_elev_min_deg);
   p.putString("wd_url",     g_cfg.wd_url);
   p.putString("wd_user",    g_cfg.wd_user);
   p.putString("wd_pass",    g_cfg.wd_pass);

@@ -1,8 +1,8 @@
-// mqtt_pub.h — agriha 1値1トピック publisher (matches agri-env-poe).
+// mqtt_pub.h — agriha 1値1トピック publisher for CamShot.
 //
-// Publishes InRadiation (from ADS1110/PVSS-03) and CamShot (URL of the
-// most recent camera upload) as <prefix>/sensor/<Type> retained JSONs of
-// the form {"value":<num-or-string>,"unit":"<unit>","ts":<epoch>}.
+// Publishes CamShot (URL of the most recent camera upload) as
+// <prefix>/sensor/CamShot retained JSON of the form
+// {"value":"<url>","unit":"url","ts":<epoch>}.
 
 #pragma once
 
@@ -10,7 +10,6 @@
 #include <time.h>
 #include <AgriNode.h>
 #include "config.h"
-#include "sensors.h"
 
 inline long mqttNow() {
   time_t t = time(nullptr);
@@ -32,14 +31,6 @@ inline bool mqttPublishOne(const char *type, const char *unit,
                                      (unsigned)n, /*retain=*/true);
   Serial.printf("[MQTT] %s %s %s\n", topic, valueLiteral, ok ? "OK" : "FAIL");
   return ok;
-}
-
-inline bool mqttPublishSolar() {
-  if (!agri::MQTT::hasHost(g_cfg.common) || !agri::MQTT::connected()) return false;
-  if (!g_ads_ok || isnan(g_solar_wm2)) return false;
-  char buf[16];
-  dtostrf(g_solar_wm2, 1, 1, buf);
-  return mqttPublishOne("InRadiation", "W/m^2", buf);
 }
 
 // Publish the URL of the last uploaded image. Retained so ArSprout /
