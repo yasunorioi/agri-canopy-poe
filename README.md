@@ -99,6 +99,9 @@ pio run -e poecam-canopy -t upload                                   # 初回 US
 pio run -e poecam-canopy -t upload --upload-port agri-canopy-01.local  # OTA
 ```
 
+> 🛠 **ビルド環境（Windows / Linux 共用）・Linux 初回セットアップ（udev 等）** →
+> [agri-node-poe-core/docs/cross-platform-build.md](https://github.com/yasunorioi/agri-node-poe-core/blob/main/docs/cross-platform-build.md)
+
 書き込み後は `http://agri-canopy-01.local/` で UI にアクセス。
 Update ボタンから GitHub Release 経由で更新可。
 
