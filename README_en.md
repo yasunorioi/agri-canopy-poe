@@ -2,7 +2,7 @@
 
 [🇯🇵 日本語](README_ja.md) · **English**
 
-A greenhouse canopy imaging node built on the M5Stack PoECAM-W (ESP32-WROVER
+A greenhouse canopy imaging node built on the [M5Stack PoECAM-W](https://docs.m5stack.com/en/unit/PoECAM-W) (ESP32-WROVER
 + W5500 + OV2640). A pared-down design that simply captures images on a
 schedule and sends them to a WebDAV server via HTTP PUT. The shared
 foundation is
@@ -11,7 +11,7 @@ the capture cycle is gated by the solar elevation computed with the NOAA
 solar position formula from the UTC picked up via NTP plus the
 latitude/longitude entered in `/config`.
 
-> **In v0.3.0 the ADS1110/PVSS-03 pyranometer path was removed**. It became
+> **In v0.3.0 the [ADS1110](https://docs.m5stack.com/en/unit/Unit-ADC_V1.1)/[PVSS-03](https://www.sanko-web.co.jp/product/pvssap/product-pvss-03/) pyranometer path was removed**. It became
 > unusable due to on-site ADC noise, so the `InRadiation` transmission and
 > UECS-CCM output were removed at the same time. Everything is now
 > consolidated into the time-based daylight gate.

@@ -2,14 +2,14 @@
 
 **日本語** · [🇬🇧 English](README_en.md)
 
-M5Stack PoECAM-W (ESP32-WROVER + W5500 + OV2640) を使った温室
+[M5Stack PoECAM-W](https://docs.m5stack.com/en/unit/PoECAM-W) (ESP32-WROVER + W5500 + OV2640) を使った温室
 キャノピー撮影ノード。定刻に画像を撮って WebDAV サーバに HTTP PUT で
 送るだけの割り切り構成。共通基盤は
 [`agri-node-poe-core`](https://github.com/yasunorioi/agri-node-poe-core)、
 撮影サイクルは NTP で拾った UTC + `/config` で入力した緯度経度から NOAA
 太陽位置式で計算した太陽高度で gate する。
 
-> **v0.3.0 で ADS1110/PVSS-03 の日射計パスを撤去**。現地の ADC ノイズで
+> **v0.3.0 で [ADS1110](https://docs.m5stack.com/en/unit/Unit-ADC_V1.1)/[PVSS-03](https://www.sanko-web.co.jp/product/pvssap/product-pvss-03/) の日射計パスを撤去**。現地の ADC ノイズで
 > 使い物にならなくなったため、`InRadiation` 送信と UECS-CCM 出力も同時に
 > 削除。時刻ベースの daylight gate に一本化してある。
 
